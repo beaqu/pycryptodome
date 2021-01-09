@@ -20,12 +20,37 @@
 # SOFTWARE.
 # ===================================================================
 
-__all__ = [ 'new', 'PKCS115_Cipher' ]
+__all__ = ['new', 'PKCS115_Cipher']
 
-from Crypto.Util.number import ceil_div, bytes_to_long, long_to_bytes
-from Crypto.Util.py3compat import bord, _copy_bytes
-import Crypto.Util.number
 from Crypto import Random
+from Crypto.Util.number import bytes_to_long, long_to_bytes
+from Crypto.Util.py3compat import bord, is_bytes, _copy_bytes
+
+from Crypto.Util._raw_api import (load_pycryptodome_raw_lib, c_size_t,
+                                  c_uint8_ptr)
+
+
+_raw_pkcs1_decode = load_pycryptodome_raw_lib("Crypto.Cipher._pkcs1_decode",
+                        """
+                        int pkcs1_decode(const uint8_t *em,
+                                         size_t len_em,
+                                         const uint8_t *sentinel,
+                                         size_t len_sentinel,
+                                         uint8_t *output);
+                        """)
+
+
+def _pkcs1_decode(em, sentinel, output):
+    if len(em) != len(output):
+        raise ValueError("Incorrect output length")
+
+    ret = _raw_pkcs1_decode.pkcs1_decode(c_uint8_ptr(em),
+                                         c_size_t(len(em)),
+                                         c_uint8_ptr(sentinel),
+                                         c_size_t(len(sentinel)),
+                                         c_uint8_ptr(output))
+    return ret
+
 
 class PKCS115_Cipher:
     """This cipher can perform PKCS#1 v1.5 RSA encryption or decryption.
@@ -74,8 +99,7 @@ class PKCS115_Cipher:
         """
 
         # See 7.2.1 in RFC8017
-        modBits = Crypto.Util.number.size(self._key.n)
-        k = ceil_div(modBits,8) # Convert from bits to bytes
+        k = self._key.size_in_bytes()
         mLen = len(message)
 
         # Step 1
@@ -143,11 +167,13 @@ class PKCS115_Cipher:
 
             1. Select as ``sentinel`` a value that resembles a plausable random, invalid message.
             2. Not report back an error as soon as you detect a ``sentinel`` value.
-               Put differently, you should not explicitly check if the returned value is the ``sentinel`` or not.
+               Put differently, you should not explicitly check if the returned value
+               is the ``sentinel`` or not.
             3. Cover all possible errors with a single, generic error indicator.
             4. Embed into the definition of ``message`` (at the protocol level) a digest (e.g. ``SHA-1``).
                It is recommended for it to be the rightmost part ``message``.
-            5. Where possible, monitor the number of errors due to ciphertexts originating from the same party,
+            5. Where possible, monitor the number of errors due to ciphertexts originating
+               from the same party,
                and slow down the rate of the requests from such party (or even blacklist it altogether).
 
             **If you are designing a new protocol, consider using the more robust PKCS#1 OAEP.**
@@ -156,25 +182,35 @@ class PKCS115_Cipher:
 
         """
 
-        # See 7.2.1 in RFC3447
-        modBits = Crypto.Util.number.size(self._key.n)
-        k = ceil_div(modBits,8) # Convert from bits to bytes
+        # See 7.2.2 in RFC8017
+        k = self._key.size_in_bytes()
 
         # Step 1
         if len(ciphertext) != k:
-            raise ValueError("Ciphertext with incorrect length.")
+            raise ValueError("Ciphertext with incorrect length (not %d bytes)." % k)
+
         # Step 2a (O2SIP)
         ct_int = bytes_to_long(ciphertext)
+
         # Step 2b (RSADP)
         m_int = self._key._decrypt(ct_int)
+
         # Complete step 2c (I2OSP)
         em = long_to_bytes(m_int, k)
+
         # Step 3
-        sep = em.find(b'\x00', 2)
-        if  not em.startswith(b'\x00\x02') or sep < 10:
-            return sentinel
-        # Step 4
-        return em[sep + 1:]
+
+        # Step 4 (not constant time)
+        output = bytearray(k)
+        if not is_bytes(sentinel) or len(sentinel) > k:
+            size = _pkcs1_decode(em, b'', output)
+            if size < 0:
+                return sentinel
+            else:
+                return output[size:]
+
+        size = _pkcs1_decode(em, sentinel, output)
+        return output[size:]
 
 
 def new(key, randfunc=None):
@@ -196,4 +232,3 @@ def new(key, randfunc=None):
     if randfunc is None:
         randfunc = Random.get_random_bytes
     return PKCS115_Cipher(key, randfunc)
-
