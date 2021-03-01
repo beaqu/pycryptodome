@@ -94,7 +94,7 @@ class EaxMode(object):
                       self.digest, self.verify]
 
         # MAC tag length
-        if not (4 <= self._mac_len <= self.block_size):
+        if not (2 <= self._mac_len <= self.block_size):
             raise ValueError("Parameter 'mac_len' must not be larger than %d"
                              % self.block_size)
 
